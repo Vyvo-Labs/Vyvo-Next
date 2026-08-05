@@ -109,3 +109,9 @@ class TokenLayout:
         return ([self.soh] + list(question_ids)
                 + [self.eot, self.eoh, self.soa]
                 + list(answer_ids) + [self.eot])
+
+    def voice_clone_prompt(self, text_ids, reference_audio_ids):
+        """Build the exact prompt consumed by voice-cloning inference."""
+        return ([self.soh] + list(text_ids)
+                + [self.eot, self.eoh, self.soa, self.sos]
+                + list(reference_audio_ids))

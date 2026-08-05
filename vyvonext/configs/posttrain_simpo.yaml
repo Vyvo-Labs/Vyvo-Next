@@ -1,0 +1,46 @@
+# Reference-free preference optimization on Whisper-WER-ranked pairs.
+
+model:
+  checkpoint: "Vyvo/Vyvo-Multilingual-EN-FT-v0.1"
+  tokenizer_name: "Qwen/Qwen3-0.6B"
+  attn_implementation: "kernels-community/flash-attn2"
+
+data:
+  dataset: "data/wer_preferences"
+  pad_token: 151643
+  minimum_wer_gap: 0.05
+  max_total_tokens: 16384
+  validation_fraction: 0.10
+
+loss:
+  beta: 2.0
+  gamma: 1.0                      # gamma / beta = 0.5 starting point
+  sft_weight: 0.1                 # stabilizes preference-only training
+  wer_gap_scale: 1.0              # bounded confidence weight from the WER gap
+  compiled: true                  # Liger chunked loss; disable for debugging only
+
+training:
+  output_dir: "checkpoints/posttrain_simpo"
+  run_name: "vyvo-en-wer-simpo"
+  # The small-data ablation peaked at the first quarter epoch and regressed by
+  # half an epoch. Extend only when independent development WER improves.
+  epochs: 0.25
+  max_steps: -1                   # set for an exact optimizer-step budget
+  batch_size: 1                  # collator evaluates chosen + rejected together
+  eval_batch_size: 1
+  gradient_accumulation_steps: 1
+  learning_rate: 5.0e-7
+  warmup_steps: 2
+  weight_decay: 0.01
+  max_grad_norm: 0.5
+  lr_scheduler_type: "cosine"
+  optim: "adamw_torch_fused"
+  gradient_checkpointing: true
+  tf32: true
+  logging_steps: 1
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  save_total_limit: 2
+  report_to: "wandb"
+  dataloader_num_workers: 0
+  seed: 42
