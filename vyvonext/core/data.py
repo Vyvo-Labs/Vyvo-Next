@@ -29,6 +29,37 @@ def make_collator(pad_token):
     return collate
 
 
+def make_preference_collator(pad_token):
+    """Pad chosen/rejected continuations into one SimPO model forward.
+
+    Preference parquet rows contain complete sequences plus response-only
+    labels. Chosen rows occupy the first half of the returned batch and rejected
+    rows the second half; ``SimPOTrainer`` relies on that stable ordering.
+    """
+    def pad(seqs, value):
+        return torch.nn.utils.rnn.pad_sequence(
+            [torch.tensor(seq, dtype=torch.long) for seq in seqs],
+            batch_first=True, padding_value=value)
+
+    def collate(features):
+        chosen_ids = [feature["chosen_input_ids"] for feature in features]
+        rejected_ids = [feature["rejected_input_ids"] for feature in features]
+        chosen_labels = [feature["chosen_labels"] for feature in features]
+        rejected_labels = [feature["rejected_labels"] for feature in features]
+        all_ids = chosen_ids + rejected_ids
+        all_labels = chosen_labels + rejected_labels
+        attention = [[1] * len(ids) for ids in all_ids]
+        gaps = [float(feature["wer_gap"]) for feature in features]
+        return {
+            "input_ids": pad(all_ids, pad_token),
+            "attention_mask": pad(attention, 0),
+            "labels": pad(all_labels, -100),
+            "wer_gap": torch.tensor(gaps, dtype=torch.float32),
+        }
+
+    return collate
+
+
 class AlternatingDistributedSampler(DistributedSampler):
     """Strided, non-shuffled sampler that preserves the text/speech interleave.
 

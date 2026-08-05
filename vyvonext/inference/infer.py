@@ -2,9 +2,9 @@ import os
 
 import soundfile as sf
 import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, LogitsProcessor
 
-from vyvonext.core.tokens import TokenLayout
+from vyvonext.core.tokens import AUDIO_OFFSET, TokenLayout
 from vyvonext.core.audio import MimiCodec
 
 # Config (hardcoded; no CLI args). Single-GPU, multilingual voice cloning: given a
@@ -21,8 +21,9 @@ DEVICE = "cuda:0"
 # Generation
 MAX_NEW_TOKENS = 9600
 MIN_NEW_TOKENS = 960            # floor avoids early EOS truncating the clip
-TEMPERATURE = 0.7
+TEMPERATURE = 0.45
 TOP_P = 0.9
+TOP_K = 20
 REPETITION_PENALTY = 1.1
 
 # Jobs: (out_name, ref_wav, ref_text, target_text). Any language works.
@@ -33,10 +34,38 @@ REF_JA_TEXT = "ごめん、少し遅れてしまった。終電電車がとて�
 
 JOBS = [
     ("en_1", REF_EN, REF_EN_TEXT, "Hello, this is a test of the text to speech model."),
-    ("en_2", REF_EN, REF_EN_TEXT, "Artificial intelligence is transforming the way we live and work."),
+    (
+        "en_2",
+        REF_EN,
+        REF_EN_TEXT,
+        "Artificial intelligence is transforming the way we live and work.",
+    ),
     ("ja_1", REF_JA, REF_JA_TEXT, "こんにちは、これは音声合成モデルのテストです。"),
     ("ja_2", REF_JA, REF_JA_TEXT, "桜の花が満開で、とても美しい春の一日でした。"),
 ]
+
+
+class MimiCodebookLogitsProcessor(LogitsProcessor):
+    """Keep generation inside the expected Mimi codebook and EOS positions."""
+
+    def __init__(self, layout, prompt_length, minimum_tokens):
+        self.layout = layout
+        self.prompt_length = prompt_length
+        self.minimum_tokens = minimum_tokens
+
+    def __call__(self, input_ids, scores):
+        generated = input_ids.shape[1] - self.prompt_length
+        codebook = generated % self.layout.num_codebooks
+        start = (self.layout.base + AUDIO_OFFSET
+                 + codebook * self.layout.codebook_size)
+        end = start + self.layout.codebook_size
+        allowed_scores = scores[:, start:end].clone()
+        eos_scores = scores[:, self.layout.eos_speech].clone()
+        scores.fill_(-float("inf"))
+        scores[:, start:end] = allowed_scores
+        if codebook == 0 and generated >= self.minimum_tokens:
+            scores[:, self.layout.eos_speech] = eos_scores
+        return scores
 
 
 class VyvoNextTTS:
@@ -51,23 +80,44 @@ class VyvoNextTTS:
         self.codec = MimiCodec(device, num_codebooks=self.layout.num_codebooks)
 
     @torch.no_grad()
-    def clone(self, text, ref_wav, ref_text, output_path=None):
+    def clone(
+        self,
+        text,
+        ref_wav,
+        ref_text,
+        output_path=None,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        top_k=TOP_K,
+        repetition_penalty=REPETITION_PENALTY,
+        min_new_tokens=MIN_NEW_TOKENS,
+        max_new_tokens=MAX_NEW_TOKENS,
+    ):
         """Speak `text` in the voice of `ref_wav` (primed by its transcript `ref_text`).
 
         Returns the mono float32 waveform (None if no valid audio), and writes it
-        to `output_path` when given.
+        to `output_path` when given. `ref_text` should be an exact, punctuated
+        transcript; transcript errors materially reduce intelligibility.
         """
         layout, tok, codec = self.layout, self.tok, self.codec
         ref_ids = layout.codes_to_ids(codec.encode_file(ref_wav))
         text_ids = tok((ref_text + " " + text).strip(), add_special_tokens=False).input_ids
-        prompt = [layout.soh] + text_ids + [layout.eot, layout.eoh, layout.soa, layout.sos] + ref_ids
+        prompt = layout.voice_clone_prompt(text_ids, ref_ids)
         inp = torch.tensor([prompt], device=self.device)
+        logits_processor = [
+            MimiCodebookLogitsProcessor(
+                layout,
+                prompt_length=inp.shape[1],
+                minimum_tokens=min_new_tokens,
+            )
+        ]
         out = self.model.generate(
             inp, attention_mask=torch.ones_like(inp),
-            max_new_tokens=MAX_NEW_TOKENS, min_new_tokens=MIN_NEW_TOKENS,
-            do_sample=True, temperature=TEMPERATURE, top_p=TOP_P,
-            repetition_penalty=REPETITION_PENALTY,
-            eos_token_id=layout.eos_speech, pad_token_id=tok.eos_token_id)
+            max_new_tokens=max_new_tokens, min_new_tokens=min_new_tokens,
+            do_sample=True, temperature=temperature, top_p=top_p, top_k=top_k,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=layout.eos_speech, pad_token_id=tok.eos_token_id,
+            logits_processor=logits_processor)
         codes = layout.ids_to_codes(out[0, inp.shape[1]:].tolist())
         if codes is None:
             return None

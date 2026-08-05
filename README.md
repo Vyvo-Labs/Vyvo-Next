@@ -10,7 +10,7 @@ language (EN/JA). Built on the Orpheus recipe.
 ## Installation
 
 ```bash
-pip install -r vyvonext/requirements.txt   # Python 3.10, CUDA 12.x
+pip install -r requirements.txt             # Python 3.10, CUDA 12.x
 export HF_TOKEN=...                         # for private dataset/model pulls
 ```
 
@@ -32,6 +32,13 @@ audio = engine.clone(
     output_path="output.wav",
 )
 ```
+
+For the English FT checkpoint, use an exact, punctuated reference transcript.
+The inference defaults are the validated quality profile: temperature `0.45`,
+top-p `0.90`, top-k `20`, repetition penalty `1.10`, and Mimi codebook-aware
+token constraints. For highest intelligibility, generate 4–6 candidates and
+select the lowest-WER ASR transcription; use speaker similarity and a speech
+quality metric to break WER ties.
 
 Batch synthesis — edit `CKPT` and `JOBS` at the top of the script, then:
 
@@ -63,6 +70,29 @@ accelerate launch --config_file vyvonext/configs/accelerate_config.yaml \
 accelerate launch --config_file vyvonext/configs/accelerate_config.yaml \
                   -m vyvonext.training.finetune
 ```
+
+### WER-focused post-training
+
+After ordinary FT, generate several candidates per training prompt,
+transcribe them with Whisper-Turbo, and put their WAV paths and transcripts in
+a JSONL manifest. The real `target_wav` becomes the chosen response, while the
+closest worse model generation becomes the hard negative. Encode the pairs,
+then run the fused SimPO recipe:
+
+```bash
+python -m vyvonext.preprocessing.encode_wer_preferences \
+  --manifest data/wer_candidates.jsonl \
+  --output data/wer_preferences/train.parquet
+
+accelerate launch --config_file vyvonext/configs/accelerate_config.yaml \
+  -m vyvonext.training.posttrain_simpo \
+  --config vyvonext/configs/posttrain_simpo.yaml
+```
+
+Do not build preference pairs from the Seed-TTS test split. Select checkpoints
+on a separate development split, then report the untouched test WER with an
+independent ASR scorer. See [WER post-training](docs/wer_posttraining.md) for the
+manifest schema, tuning ranges, and quality guardrails.
 
 ## Acknowledgements
 
